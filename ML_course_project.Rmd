@@ -1,0 +1,193 @@
+---
+title: "Qualitative Activity Recognition by MLalgorithms"
+author: "RG"
+date: '`r date()`'
+output:
+  html_document: default
+  pdf_document:
+    keep_tex: yes
+  word_document: default
+---
+```{r setOptions, echo=FALSE, message = FALSE, comment = FALSE}
+#set options for values printing
+options(scipen=1, digits=2)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(rattle)
+library(ggplot2)
+
+if(file.exists("dataEnv.RData")){
+  load("dataEnv.RData")
+}
+```
+
+
+# Overview
+Person activity monitoring become very popular due to different tracking devices that appeared on the market such as belts, bands and smartphones. This report explains how some of the most popular ML algorithms can be used for quantifing how well people perform dumbbell biceps curl.
+<br><br>
+
+# Introduction
+
+In this project, the goal is to build models by using recorded data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants while they were performing dumbbell biceps curl. They were asked to perform dumbbell lifts correctly and incorrectly in 5 different ways. This is supervised learning task where the result is classifier that according to measurements outputs one of six possible outcomes.
+
+# Getting and cleaning the data
+
+The data can be downloaded and loaded with the following commands:
+
+```{r data, echo = TRUE, eval = FALSE}
+if(!is.element("data",dir())){
+  dir.create("./data")
+}
+
+if(!is.element("pml-training.csv",dir("./data"))){
+  
+  # download data
+  trainURL<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+  testURL<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+  download.file(trainURL, destfile = "./data/pml-training.csv")
+  download.file(testURL, destfile = "./data/pml-testing.csv")
+  dateDownloaded <- date()
+}
+
+# read data
+train <- read.csv("./data/pml-training.csv", header = TRUE, sep = ",", na.strings=c("NA", "", "#DIV/0!"))
+test <- read.csv("./data/pml-testing.csv", header = TRUE, sep = ",", na.strings=c("NA", "", "#DIV/0!"))
+```
+
+The resulting dataframe $train$ for model training has 19622 observations of 149 different variables (metadata and measurements obtained by inertail measurement units) and label (A-F) which is factor variable that stands for how does the subject is performing exercise. The dataframe $test$ is not used in this report.
+Before model training, data cleaning has to performed. There are several variables in the dataframe which has to be removed (metadata). Apart from thath, there are missing values that should be removed or imputed. Following chunk of removes metadata and columns with more than 20% of missing values in $train$ dataframe:
+
+```{r cleaning, echo = TRUE, eval = FALSE}
+#delete metadata
+train <- train[,8:160]
+test <- test[,8:160]
+
+#delete columns with more than 20% NAs
+borNA <- round(dim(train)[1]*0.2,0)
+colDelete = c()
+
+for(i in 1:dim(train)[2]){
+  
+  if(sum(is.na(train[,i])) > borNA)
+    colDelete <- c(colDelete, i)    
+}
+
+train <- train[, -colDelete]
+test <- test[, -colDelete]
+```
+
+The dataframe is then searched for any remaining NAs which should be imputed. Any constant column or column with nero zero variance should be deleted since they will not contribute to the predictive power of the models:
+
+```{r cleaningColAdditional, echo = TRUE, eval = TRUE}
+#check how many remaining NAs in remaining columns and whether imputing should be performed
+sumNA = rep(0,dim(train)[2])
+for(i in 1:dim(train)[2]){  
+  sumNA[i] <- sum(is.na(train[,i]))  
+}
+sumNA
+
+# check if some variables don't have enough variability
+nzvResults <- nearZeroVar(train, saveMetrics = TRUE)
+sum(nzvResults$nzv)
+```
+It appears that there is no NAs that should be imputed and no additional columns that should be deleted so the dataframe for modeling consists of 53 columns (52 input variable + one output variable).
+<br><br>
+
+# Divide data
+
+The available training data is divided into the two sets. 70% is used for model training and the rest of the data will be used for model testing, i.e. to estimate model generalization ability.
+
+```{r divideData, echo = TRUE, eval = FALSE}
+## divide available data
+sampleIndex = createDataPartition(train$classe, p = 0.7,list=FALSE)
+training = train[sampleIndex,]
+validation = train[-sampleIndex,]
+```
+<br><br>
+
+# Model training
+
+Three different models are developed. In all models, 5 fold cross validation is used to estimate optimal values of free parameters:
+
+```{r fitControl, echo = TRUE, eval = FALSE}
+# 5-fold CV
+fitControl <- trainControl(method = "cv", number = 5)
+```
+
+### Decision tree
+The following chunk of code train decision tree using $training$ dataframe:
+
+```{r treeModel, echo = TRUE, eval = FALSE}
+set.seed(235)
+tree_model <- train(classe ~ ., data = training,
+                    method = "rpart", tuneLength = 30,
+                    trControl = fitControl)
+```
+
+### Boosted tree
+Second model developed is boosted version of decision tree. Hereby, four different parameters have to be selected. Two are fixed in advance while two parameters are explored by means of cross validation.
+
+```{r boosteTreeModel, echo = TRUE, eval = FALSE}
+#train boosted tree
+set.seed(657)
+gbmGrid <-  expand.grid(interaction.depth = c(1, 5, 10),
+                        n.trees = c(10, 50, 200),
+                        shrinkage = 0.1,
+                        n.minobsinnode = 10)
+gbm_model <- train(classe ~ ., data = training,
+                 method = "gbm",
+                 trControl = fitControl,
+                 verbose = FALSE,
+                 tuneGrid = gbmGrid)
+```
+<br><br>
+                    
+### Support vector machine
+
+The last model is Support vector machine. The data are standardized (centering and scaling to unit variance) before model parameter estimation. Radial basis kernel is used. Optimal values of two parameters are estimated by means of cross validation.
+
+```{r svm, echo = TRUE, eval = FALSE}
+#train SVM
+set.seed(21)
+svm_model <- train(x = subset(training, select = -classe ),
+                 y = training$classe,
+                 method = "svmRadial",
+                 tuneLength = 9,
+                 preProc = c("center", "scale"),
+                 trControl = fitControl)
+```
+<br><br>
+
+# Model testing
+
+In order two gain insight into prediction classification capabilities, the derived models are tested on the data set that was completely out of the training procedure:
+
+```{r testing, echo = TRUE, eval = FALSE}
+#test models
+predictions_tree <- predict(tree_model, newdata = validation)
+predictions_gbm <- predict(gbm_model, newdata = validation)
+predictions_svm <- predict(svm_model, newdata = validation[,1:52])
+```
+
+The testing results can be seen as confusion matrix where off diagonal elements show number of missclassification:
+```{r confmatrix, echo = TRUE, eval = TRUE, message = FALSE}
+resultsValidation_tree <- confusionMatrix(predictions_tree, validation$classe)
+resultsValidation_gbm <- confusionMatrix(predictions_gbm, validation$classe)
+resultsValidation_svm <- confusionMatrix(predictions_svm, validation$classe)
+
+resultsValidation_tree$table
+resultsValidation_gbm$table
+resultsValidation_svm$table
+```
+
+Models overall accuracy:
+```{r accuracy, echo = TRUE, eval = TRUE, message = FALSE}
+overallAcc <- data.frame(accuracy = c(resultsValidation_tree$overall[1], resultsValidation_gbm$overall[1],resultsValidation_svm$overall[1]), model = c("tree","boosted tree", "svm"))
+
+ggplot(overallAcc, aes(x = model, y = accuracy, fill = model)) + geom_bar(stat = "identity")
+```
+
+It can be concluded that boosted tree and SVM have very high classification accuracy (99%) on the unseen data, while the simple decision tree has accuracy about 82%.
+
+
